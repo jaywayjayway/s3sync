@@ -18,7 +18,7 @@ import (
 
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/session"
-	"github.com/seqsense/s3sync"
+	"github.com/jaywayjayway/s3sync"
 )
 
 // Usage: go run ./examples/simple s3://example-bucket/path/to/source path/to/dest

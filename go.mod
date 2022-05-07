@@ -5,7 +5,6 @@ go 1.17
 require (
 	github.com/aws/aws-sdk-go v1.44.9
 	github.com/gabriel-vasile/mimetype v1.4.0
-	github.com/seqsense/s3sync v1.8.1
 )
 
 require (
