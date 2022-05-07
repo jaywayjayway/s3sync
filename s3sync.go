@@ -78,15 +78,16 @@ func New(sess *session.Session, options ...Option) *Manager {
 }
 
 // Sync syncs the files between s3 and local disks.
-func (m *Manager) Sync(source, dest string) error {
+func (m *Manager) Sync(source, dest string) (int64,error) {
+	var sumBytes int64
 	sourceURL, err := url.Parse(source)
 	if err != nil {
-		return err
+		return 0,err
 	}
 
 	destURL, err := url.Parse(dest)
 	if err != nil {
-		return err
+		return 0,err
 	}
 
 	chJob := make(chan func())
@@ -108,27 +109,27 @@ func (m *Manager) Sync(source, dest string) error {
 	if isS3URL(sourceURL) {
 		sourceS3Path, err := urlToS3Path(sourceURL)
 		if err != nil {
-			return err
+			return 0,err
 		}
 		if isS3URL(destURL) {
 			destS3Path, err := urlToS3Path(destURL)
 			if err != nil {
-				return err
+				return 0,err
 			}
-			return m.syncS3ToS3(chJob, sourceS3Path, destS3Path)
+			return 0,m.syncS3ToS3(chJob, sourceS3Path, destS3Path)
 		}
-		return m.syncS3ToLocal(chJob, sourceS3Path, dest)
+		return sumBytes,m.syncS3ToLocal(&sumBytes, chJob, sourceS3Path, dest)
 	}
 
 	if isS3URL(destURL) {
 		destS3Path, err := urlToS3Path(destURL)
 		if err != nil {
-			return err
+			return 0,err
 		}
-		return m.syncLocalToS3(chJob, source, destS3Path)
+		return sumBytes,m.syncLocalToS3(chJob, source, destS3Path)
 	}
 
-	return errors.New("local to local sync is not supported")
+	return 0,errors.New("local to local sync is not supported")
 }
 
 func isS3URL(url *url.URL) bool {
@@ -171,7 +172,7 @@ func (m *Manager) syncLocalToS3(chJob chan func(), sourcePath string, destPath *
 }
 
 // syncS3ToLocal syncs the given s3 path to the given local path.
-func (m *Manager) syncS3ToLocal(chJob chan func(), sourcePath *s3Path, destPath string) error {
+func (m *Manager) syncS3ToLocal( sumBytes *int64,chJob chan func(), sourcePath *s3Path, destPath string) error {
 	wg := &sync.WaitGroup{}
 	errs := &multiErr{}
 	for source := range filterFilesForSync(
@@ -187,9 +188,10 @@ func (m *Manager) syncS3ToLocal(chJob chan func(), sourcePath *s3Path, destPath 
 			}
 			switch source.op {
 			case opUpdate:
-				if err := m.download(source.fileInfo, sourcePath, destPath); err != nil {
+				if err := m.download(sumBytes,source.fileInfo, sourcePath, destPath);err != nil{
 					errs.Append(err)
 				}
+
 			case opDelete:
 				if err := m.deleteLocal(source.fileInfo, destPath); err != nil {
 					errs.Append(err)
@@ -202,7 +204,8 @@ func (m *Manager) syncS3ToLocal(chJob chan func(), sourcePath *s3Path, destPath 
 	return errs.ErrOrNil()
 }
 
-func (m *Manager) download(file *fileInfo, sourcePath *s3Path, destPath string) error {
+func (m *Manager) download(sumBytes *int64,file *fileInfo, sourcePath *s3Path, destPath string) (error){
+	var n int64
 	var targetFilename string
 	if !strings.HasSuffix(destPath, "/") && file.singleFile {
 		// Destination path is not a directory and source is a single file.
@@ -236,13 +239,14 @@ func (m *Manager) download(file *fileInfo, sourcePath *s3Path, destPath string) 
 		sourceFile = filepath.ToSlash(filepath.Join(sourcePath.bucketPrefix, file.name))
 	}
 
-	_, err = s3manager.NewDownloaderWithClient(
+	n,err = s3manager.NewDownloaderWithClient(
 		m.s3,
 		m.downloaderOpts...,
 	).Download(writer, &s3.GetObjectInput{
 		Bucket: aws.String(sourcePath.bucket),
 		Key:    aws.String(sourceFile),
 	})
+	*sumBytes += n
 	if err != nil {
 		return err
 	}
@@ -526,3 +530,4 @@ func fileInfoChanToMap(files chan *fileInfo) (map[string]*fileInfo, error) {
 	}
 	return result, nil
 }
+
