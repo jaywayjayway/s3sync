@@ -78,16 +78,17 @@ func New(sess *session.Session, options ...Option) *Manager {
 }
 
 // Sync syncs the files between s3 and local disks.
-func (m *Manager) Sync(source, dest string) (int64,error) {
+func (m *Manager) Sync(source, dest string) (int64,int64,error) {
 	var sumBytes int64
+	var fileNumbers int64
 	sourceURL, err := url.Parse(source)
 	if err != nil {
-		return 0,err
+		return 0,0,err
 	}
 
 	destURL, err := url.Parse(dest)
 	if err != nil {
-		return 0,err
+		return 0,0,err
 	}
 
 	chJob := make(chan func())
@@ -109,27 +110,27 @@ func (m *Manager) Sync(source, dest string) (int64,error) {
 	if isS3URL(sourceURL) {
 		sourceS3Path, err := urlToS3Path(sourceURL)
 		if err != nil {
-			return 0,err
+			return 0,0,err
 		}
 		if isS3URL(destURL) {
 			destS3Path, err := urlToS3Path(destURL)
 			if err != nil {
-				return 0,err
+				return 0,0,err
 			}
-			return 0,m.syncS3ToS3(chJob, sourceS3Path, destS3Path)
+			return 0,0,m.syncS3ToS3(chJob, sourceS3Path, destS3Path)
 		}
-		return sumBytes,m.syncS3ToLocal(&sumBytes, chJob, sourceS3Path, dest)
+		return fileNumbers,sumBytes,m.syncS3ToLocal(&fileNumbers,&sumBytes, chJob, sourceS3Path, dest)
 	}
 
 	if isS3URL(destURL) {
 		destS3Path, err := urlToS3Path(destURL)
 		if err != nil {
-			return 0,err
+			return 0,0,err
 		}
-		return sumBytes,m.syncLocalToS3(&sumBytes,chJob, source, destS3Path)
+		return fileNumbers,sumBytes,m.syncLocalToS3(&fileNumbers,&sumBytes,chJob, source, destS3Path)
 	}
 
-	return 0,errors.New("local to local sync is not supported")
+	return 0,0,errors.New("local to local sync is not supported")
 }
 
 func isS3URL(url *url.URL) bool {
@@ -140,7 +141,7 @@ func (m *Manager) syncS3ToS3(chJob chan func(), sourcePath, destPath *s3Path) er
 	return errors.New("S3 to S3 sync feature is not implemented")
 }
 
-func (m *Manager) syncLocalToS3(sumBytes *int64, chJob chan func(), sourcePath string, destPath *s3Path) error {
+func (m *Manager) syncLocalToS3(fileNumber,sumBytes *int64, chJob chan func(), sourcePath string, destPath *s3Path) error {
 	wg := &sync.WaitGroup{}
 	errs := &multiErr{}
 	for source := range filterFilesForSync(
@@ -156,7 +157,7 @@ func (m *Manager) syncLocalToS3(sumBytes *int64, chJob chan func(), sourcePath s
 			}
 			switch source.op {
 			case opUpdate:
-				if err := m.upload(sumBytes,source.fileInfo, sourcePath, destPath); err != nil {
+				if err := m.upload(fileNumber,sumBytes,source.fileInfo, sourcePath, destPath); err != nil {
 					errs.Append(err)
 				}
 			case opDelete:
@@ -172,7 +173,7 @@ func (m *Manager) syncLocalToS3(sumBytes *int64, chJob chan func(), sourcePath s
 }
 
 // syncS3ToLocal syncs the given s3 path to the given local path.
-func (m *Manager) syncS3ToLocal( sumBytes *int64,chJob chan func(), sourcePath *s3Path, destPath string) error {
+func (m *Manager) syncS3ToLocal( fileNumber,sumBytes *int64,chJob chan func(), sourcePath *s3Path, destPath string) error {
 	wg := &sync.WaitGroup{}
 	errs := &multiErr{}
 	for source := range filterFilesForSync(
@@ -188,7 +189,7 @@ func (m *Manager) syncS3ToLocal( sumBytes *int64,chJob chan func(), sourcePath *
 			}
 			switch source.op {
 			case opUpdate:
-				if err := m.download(sumBytes,source.fileInfo, sourcePath, destPath);err != nil{
+				if err := m.download(fileNumber,sumBytes,source.fileInfo, sourcePath, destPath);err != nil{
 					errs.Append(err)
 				}
 
@@ -204,7 +205,7 @@ func (m *Manager) syncS3ToLocal( sumBytes *int64,chJob chan func(), sourcePath *
 	return errs.ErrOrNil()
 }
 
-func (m *Manager) download(sumBytes *int64,file *fileInfo, sourcePath *s3Path, destPath string) (error){
+func (m *Manager) download(fileNumber, sumBytes *int64,file *fileInfo, sourcePath *s3Path, destPath string) (error){
 	var n int64
 	var targetFilename string
 	if !strings.HasSuffix(destPath, "/") && file.singleFile {
@@ -246,10 +247,12 @@ func (m *Manager) download(sumBytes *int64,file *fileInfo, sourcePath *s3Path, d
 		Bucket: aws.String(sourcePath.bucket),
 		Key:    aws.String(sourceFile),
 	})
-	*sumBytes += n
+
 	if err != nil {
 		return err
 	}
+	*sumBytes += n
+	*fileNumber+=1
 
 	err = os.Chtimes(targetFilename, file.lastModified, file.lastModified)
 	if err != nil {
@@ -276,7 +279,7 @@ func (m *Manager) deleteLocal(file *fileInfo, destPath string) error {
 	return os.Remove(targetFilename)
 }
 
-func (m *Manager) upload(sumBytes *int64, file *fileInfo, sourcePath string, destPath *s3Path) error {
+func (m *Manager) upload(fileNumber, sumBytes *int64, file *fileInfo, sourcePath string, destPath *s3Path) error {
 
 	var sourceFilename string
 	if file.singleFile {
@@ -333,6 +336,7 @@ func (m *Manager) upload(sumBytes *int64, file *fileInfo, sourcePath string, des
 		ContentType: contentType,
 	})
 	*sumBytes +=fstat.Size()
+	*fileNumber +=1
 
 	if err != nil {
 		return err
