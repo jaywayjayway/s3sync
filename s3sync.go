@@ -126,7 +126,7 @@ func (m *Manager) Sync(source, dest string) (int64,error) {
 		if err != nil {
 			return 0,err
 		}
-		return sumBytes,m.syncLocalToS3(chJob, source, destS3Path)
+		return sumBytes,m.syncLocalToS3(&sumBytes,chJob, source, destS3Path)
 	}
 
 	return 0,errors.New("local to local sync is not supported")
@@ -140,7 +140,7 @@ func (m *Manager) syncS3ToS3(chJob chan func(), sourcePath, destPath *s3Path) er
 	return errors.New("S3 to S3 sync feature is not implemented")
 }
 
-func (m *Manager) syncLocalToS3(chJob chan func(), sourcePath string, destPath *s3Path) error {
+func (m *Manager) syncLocalToS3(sumBytes *int64, chJob chan func(), sourcePath string, destPath *s3Path) error {
 	wg := &sync.WaitGroup{}
 	errs := &multiErr{}
 	for source := range filterFilesForSync(
@@ -156,7 +156,7 @@ func (m *Manager) syncLocalToS3(chJob chan func(), sourcePath string, destPath *
 			}
 			switch source.op {
 			case opUpdate:
-				if err := m.upload(source.fileInfo, sourcePath, destPath); err != nil {
+				if err := m.upload(sumBytes,source.fileInfo, sourcePath, destPath); err != nil {
 					errs.Append(err)
 				}
 			case opDelete:
@@ -276,7 +276,8 @@ func (m *Manager) deleteLocal(file *fileInfo, destPath string) error {
 	return os.Remove(targetFilename)
 }
 
-func (m *Manager) upload(file *fileInfo, sourcePath string, destPath *s3Path) error {
+func (m *Manager) upload(sumBytes *int64, file *fileInfo, sourcePath string, destPath *s3Path) error {
+
 	var sourceFilename string
 	if file.singleFile {
 		sourceFilename = sourcePath
@@ -314,9 +315,14 @@ func (m *Manager) upload(file *fileInfo, sourcePath string, destPath *s3Path) er
 		return err
 	}
 
+	fstat, err := reader.Stat()
+	if err != nil {
+		return err
+	}
+
 	defer reader.Close()
 
-	_, err = s3manager.NewUploaderWithClient(
+	_,err = s3manager.NewUploaderWithClient(
 		m.s3,
 		m.uploaderOpts...,
 	).Upload(&s3manager.UploadInput{
@@ -326,6 +332,7 @@ func (m *Manager) upload(file *fileInfo, sourcePath string, destPath *s3Path) er
 		Body:        reader,
 		ContentType: contentType,
 	})
+	*sumBytes +=fstat.Size()
 
 	if err != nil {
 		return err
