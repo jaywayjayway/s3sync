@@ -31,6 +31,7 @@ import (
 
 // Manager manages the sync operation.
 type Manager struct {
+	mu             sync.Mutex
 	s3             s3iface.S3API
 	nJobs          int
 	del            bool
@@ -201,6 +202,7 @@ func (m *Manager) syncS3ToLocal( fileNumber,sumBytes *int64,chJob chan func(), s
 		}
 	}
 	wg.Wait()
+	println("files: ",fileNumber,"bytes: ",sumBytes)
 
 	return errs.ErrOrNil()
 }
@@ -216,7 +218,7 @@ func (m *Manager) download(fileNumber, sumBytes *int64,file *fileInfo, sourcePat
 	}
 	targetDir := filepath.Dir(targetFilename)
 
-	println("Downloading", file.name, "to", targetFilename)
+	//println("Downloading", file.name, "to", targetFilename)
 	if m.dryrun {
 		return nil
 	}
@@ -251,8 +253,10 @@ func (m *Manager) download(fileNumber, sumBytes *int64,file *fileInfo, sourcePat
 	if err != nil {
 		return err
 	}
+	m.mu.Lock()
 	*sumBytes += n
 	*fileNumber+=1
+	m.mu.Unlock()
 
 	err = os.Chtimes(targetFilename, file.lastModified, file.lastModified)
 	if err != nil {
@@ -295,7 +299,7 @@ func (m *Manager) upload(fileNumber, sumBytes *int64, file *fileInfo, sourcePath
 		destFile.bucketPrefix = filepath.ToSlash(filepath.Join(destPath.bucketPrefix, file.name))
 	}
 
-	println("Uploading", file.name, "to", destFile.String())
+	// println("Uploading", file.name, "to", destFile.String())
 	if m.dryrun {
 		return nil
 	}
@@ -325,7 +329,7 @@ func (m *Manager) upload(fileNumber, sumBytes *int64, file *fileInfo, sourcePath
 
 	defer reader.Close()
 
-	_,err = s3manager.NewUploaderWithClient(
+	upload,err := s3manager.NewUploaderWithClient(
 		m.s3,
 		m.uploaderOpts...,
 	).Upload(&s3manager.UploadInput{
@@ -335,12 +339,17 @@ func (m *Manager) upload(fileNumber, sumBytes *int64, file *fileInfo, sourcePath
 		Body:        reader,
 		ContentType: contentType,
 	})
-	*sumBytes +=fstat.Size()
-	*fileNumber +=1
+
 
 	if err != nil {
 		return err
 	}
+	m.mu.Lock()
+	println(destFile.bucketPrefix," Etags:",*upload.ETag)
+	println("location: ",upload.Location)
+	*sumBytes +=fstat.Size()
+	*fileNumber +=1
+	m.mu.Unlock()
 
 	return nil
 }
